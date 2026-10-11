@@ -1,0 +1,299 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Touch Grass — Cutter</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:system-ui,sans-serif;touch-action:none;user-select:none}
+#tools{position:fixed;left:50%;bottom:10px;transform:translateX(-50%);display:flex;gap:4px;flex-wrap:wrap;justify-content:center;max-width:96vw;background:rgba(0,0,0,.35);backdrop-filter:blur(8px);padding:6px;border-radius:14px}
+#tools button{font-size:22px;width:42px;height:42px;border:0;border-radius:10px;background:rgba(255,255,255,.12);cursor:pointer}
+#tools button.on{background:rgba(255,255,255,.75);box-shadow:0 0 10px #fff}
+#hud{position:fixed;left:10px;top:10px;color:#fff;background:rgba(0,0,0,.35);backdrop-filter:blur(8px);padding:8px 12px;border-radius:12px;font-size:13px;line-height:1.6}
+#hud input{width:130px;vertical-align:middle}
+#toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none}
+.t{background:rgba(0,0,0,.6);color:#fff;padding:8px 16px;border-radius:20px;font-size:15px;transition:opacity .6s}
+#dbg{position:fixed;right:10px;top:10px;background:rgba(0,0,0,.6);color:#fff;padding:10px;border-radius:12px;display:none;font-size:13px}
+#dbg button{display:block;width:100%;margin:4px 0;padding:6px;border-radius:8px;border:0;cursor:pointer}
+#dbgBtn{position:fixed;right:10px;bottom:70px;opacity:.5;border:0;border-radius:8px;padding:6px 8px;background:#fff3}
+</style>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
+</head><body>
+<div id="hud"><div style="font-size:20px;color:#7dff6a"><b>🌱 Cut: <span id="cnt">0</span></b></div><b id="tname">✂️ Scissors</b><br>
+Cut height <input id="cutH" type="range" min="0.02" max="1" step="0.01" value="0.05"> <span id="cutHv"></span><br>
+Max regrow <input id="maxH" type="range" min="0.2" max="1.7" step="0.01" value="0.7"> <span id="maxHv"></span><br>
+<span id="stats" style="opacity:.75"></span><br><span style="opacity:.6">Drag to cut · right-drag/2-finger to orbit · wheel zoom · D = debug</span></div>
+<div id="tools"></div><div id="toast"></div>
+<div id="dbg"><b>Debug</b><button id="fBird">🐦 Spawn birds</button><button id="fLow">🐦 Low-flying bird</button><button id="fEgg">🥚 Spawn nest</button><button id="fRain">🌧️ Toggle rain</button><div id="dinfo"></div></div>
+<button id="dbgBtn">🐞</button>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {Sky} from 'three/addons/objects/Sky.js';
+
+const R=new THREE.WebGLRenderer({antialias:true});R.setPixelRatio(Math.min(devicePixelRatio,2));R.setSize(innerWidth,innerHeight);
+R.toneMapping=THREE.ACESFilmicToneMapping;R.toneMappingExposure=0.55;R.shadowMap.enabled=true;R.shadowMap.type=THREE.PCFSoftShadowMap;
+document.body.appendChild(R.domElement);
+const scene=new THREE.Scene();
+const cam=new THREE.PerspectiveCamera(55,innerWidth/innerHeight,0.05,600);cam.position.set(0,4.2,9);
+const ctl=new OrbitControls(cam,R.domElement);ctl.target.set(0,0.3,0);ctl.enableDamping=true;ctl.maxPolarAngle=1.45;ctl.minDistance=2;ctl.maxDistance=30;
+ctl.mouseButtons={LEFT:null,MIDDLE:THREE.MOUSE.DOLLY,RIGHT:THREE.MOUSE.ROTATE};ctl.touches={ONE:null,TWO:THREE.TOUCH.DOLLY_ROTATE};
+// sky
+const sky=new Sky();sky.scale.setScalar(4000);scene.add(sky);
+const su=sky.material.uniforms;su.turbidity.value=6;su.rayleigh.value=1.6;su.mieCoefficient.value=0.005;su.mieDirectionalG.value=0.85;
+const sunDir=new THREE.Vector3().setFromSphericalCoords(1,THREE.MathUtils.degToRad(68),THREE.MathUtils.degToRad(150));su.sunPosition.value.copy(sunDir);
+const fogC=new THREE.Color(0xbcd3e6);scene.fog=new THREE.FogExp2(fogC.clone(),0.022);
+const hemi=new THREE.HemisphereLight(0xcfe6ff,0x3a5a20,0.9);scene.add(hemi);
+const sun=new THREE.DirectionalLight(0xfff1d6,3.2);sun.position.copy(sunDir).multiplyScalar(30);sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);Object.assign(sun.shadow.camera,{left:-15,right:15,top:15,bottom:-15,near:1,far:80});sun.shadow.bias=-0.0005;scene.add(sun);
+// ground
+const FIELD=26;
+const gnd=new THREE.Mesh(new THREE.CircleGeometry(300,64),new THREE.MeshStandardMaterial({color:0x2f3d17,roughness:1}));gnd.rotation.x=-Math.PI/2;gnd.receiveShadow=true;scene.add(gnd);
+const dirt=new THREE.Mesh(new THREE.PlaneGeometry(FIELD,FIELD),new THREE.MeshStandardMaterial({color:0x3b2f1a,roughness:1}));dirt.rotation.x=-Math.PI/2;dirt.position.y=0.002;dirt.receiveShadow=true;scene.add(dirt);
+// distant trees
+{const tg=new THREE.ConeGeometry(1.6,6,7),tm=new THREE.MeshStandardMaterial({color:0x1d3a1a,roughness:1});const n=140,im=new THREE.InstancedMesh(tg,tm,n);const m=new THREE.Matrix4();
+for(let i=0;i<n;i++){const a=Math.random()*6.283,r=40+Math.random()*60,s=0.7+Math.random()*1.4;m.compose(new THREE.Vector3(Math.cos(a)*r,3*s,Math.sin(a)*r),new THREE.Quaternion(),new THREE.Vector3(s,s,s));im.setMatrixAt(i,m)}scene.add(im)}
+
+// ===== GRASS =====
+const mobile=/Mobi|Android/i.test(navigator.userAgent);
+let N=+(new URLSearchParams(location.search).get("n"))||(mobile?60000:180000);
+const bladeGeo=new THREE.InstancedBufferGeometry();
+{const seg=5,pos=[],idx=[];for(let i=0;i<=seg;i++){const t=i/seg,w=0.5*(1-t*t*0.95);pos.push(-w,t,0,w,t,0)}
+for(let i=0;i<seg;i++){const a=i*2;idx.push(a,a+1,a+2,a+1,a+3,a+2)}
+bladeGeo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));bladeGeo.setIndex(idx)}
+const aOff=new Float32Array(N*4),aCut=new Float32Array(N*4);// off: x,z,rot,rand ; cut: cutTime,dur,cutH,startH
+const half=FIELD/2;
+for(let i=0;i<N;i++){aOff[i*4]=(Math.random()-.5)*FIELD;aOff[i*4+1]=(Math.random()-.5)*FIELD;aOff[i*4+2]=Math.random()*6.283;aOff[i*4+3]=Math.random();aCut[i*4]=-1e3;aCut[i*4+1]=1;aCut[i*4+2]=1;aCut[i*4+3]=1}
+const offAttr=new THREE.InstancedBufferAttribute(aOff,4),cutAttr=new THREE.InstancedBufferAttribute(aCut,4);cutAttr.setUsage(THREE.DynamicDrawUsage);
+bladeGeo.setAttribute('aOff',offAttr);bladeGeo.setAttribute('aCut',cutAttr);bladeGeo.instanceCount=N;
+const U={uT:{value:0},uMaxH:{value:0.7},uWind:{value:1},uWet:{value:0},uSun:{value:sunDir},uFogC:{value:scene.fog.color},uFogD:{value:0.022},uBurn:{value:0}};
+const gMat=new THREE.ShaderMaterial({uniforms:U,side:THREE.DoubleSide,vertexShader:`
+uniform float uT,uMaxH,uWind;attribute vec4 aOff,aCut;varying float vH,vR,vS;varying vec3 vN,vW;varying float vFog,vBurn;
+float h21(vec2 p){return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5);}
+void main(){
+ float full=uMaxH*(0.55+0.45*aOff.w)*(0.8+0.4*h21(aOff.xy*0.13));
+ float k=clamp((uT-aCut.x)/aCut.y,0.,1.);float e=k<1.?1.-pow(1.-k,3.):1.;
+ float start=min(aCut.z,full);float hgt=mix(start,full,e);
+ vBurn=aCut.w<0.?(1.-e):0.;
+ float w=0.012+0.012*aOff.w; vec3 p=position; float t=p.y;
+ p.x*=w; p.y*=hgt;
+ float c=cos(aOff.z),s=sin(aOff.z);p=vec3(c*p.x,p.y,s*p.x);
+ vec2 wp=aOff.xy;
+ float gust=sin(wp.x*0.35+uT*1.3)*0.5+sin(wp.y*0.27+wp.x*0.1+uT*0.9)*0.5+sin((wp.x+wp.y)*1.7+uT*3.1)*0.15;
+ float bend=(0.25+0.35*gust)*uWind+aOff.w*0.15;
+ float bt=t*t*bend*hgt;
+ p.x+=bt*0.8;p.z+=bt*0.35;p.y-=bt*bt*0.25/max(hgt,0.05);
+ vec3 wpos=vec3(wp.x,0.,wp.y)+p;
+ vH=t;vR=aOff.w;vS=hgt;vN=normalize(vec3(-s+0.3*t,0.6,c));vW=wpos;
+ vec4 mv=viewMatrix*vec4(wpos,1.);vFog=length(mv.xyz);gl_Position=projectionMatrix*mv;}`,
+fragmentShader:`uniform vec3 uSun,uFogC;uniform float uFogD,uWet;varying float vH,vR,vS,vFog,vBurn;varying vec3 vN,vW;
+void main(){vec3 base=mix(vec3(.05,.13,.02),vec3(.18,.36,.06),vR);vec3 tip=mix(vec3(.45,.62,.18),vec3(.7,.72,.3),vR*vR);
+ vec3 col=mix(base,tip,smoothstep(0.,1.,vH));
+ float pch=sin(vW.x*.4)*sin(vW.z*.33)*.5+.5;col*=0.8+0.35*pch;
+ col=mix(col,vec3(.55,.5,.25),smoothstep(.6,1.,pch*vR)*.35);
+ float ao=mix(0.25,1.,smoothstep(0.,0.7,vH*min(1.,vS*2.)+0.15));
+ vec3 n=normalize(vN);float dif=abs(dot(n,uSun))*.6+.4;
+ vec3 V=normalize(cameraPosition-vW);float sss=pow(max(dot(-V,uSun),0.),4.)*vH*0.9;
+ vec3 L=col*dif*ao*1.6+vec3(.8,.9,.3)*sss*ao;
+ vec3 H=normalize(V+uSun);L+=pow(max(dot(n,H),0.),40.)*(0.08+uWet*0.6)*vH;
+ L*=mix(1.,0.6,uWet);
+ L=mix(L,mix(vec3(.08,.05,.02),vec3(1.,.35,.05),fract(vR*7.)*.4),vBurn);
+ float f=1.-exp(-pow(uFogD*vFog,2.));gl_FragColor=vec4(mix(L,uFogC,f),1.);
+ #include <tonemapping_fragment>
+ #include <colorspace_fragment>
+}`});
+const grass=new THREE.Mesh(bladeGeo,gMat);grass.frustumCulled=false;scene.add(grass);
+// spatial grid
+const GC=0.5,GN=Math.ceil(FIELD/GC);const grid=Array.from({length:GN*GN},()=>[]);
+for(let i=0;i<N;i++){const gx=Math.min(GN-1,Math.floor((aOff[i*4]+half)/GC)),gz=Math.min(GN-1,Math.floor((aOff[i*4+1]+half)/GC));grid[gz*GN+gx].push(i)}
+function curH(i,t){const r=aOff[i*4+3],x=aOff[i*4],z=aOff[i*4+1];const hh=Math.sin(x*0.13*12.9+z*0.13*78.2)*43758.5;const full=U.uMaxH.value*(0.55+0.45*r)*(0.8+0.4*(hh-Math.floor(hh)));
+ const k=Math.min(1,Math.max(0,(t-aCut[i*4])/aCut[i*4+1]));const e=1-Math.pow(1-k,3);const st=Math.min(aCut[i*4+2],full);return st+(full-st)*e}
+
+// ===== PARTICLES (clippings) =====
+const PMAX=4000;const pGeo=new THREE.PlaneGeometry(0.012,0.06);
+const pMat=new THREE.MeshStandardMaterial({side:THREE.DoubleSide,roughness:.8,vertexColors:false});
+const pMesh=new THREE.InstancedMesh(pGeo,pMat,PMAX);pMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);pMesh.frustumCulled=false;scene.add(pMesh);
+pMesh.instanceColor=new THREE.InstancedBufferAttribute(new Float32Array(PMAX*3),3);
+const P=[];for(let i=0;i<PMAX;i++)P.push({life:0,p:new THREE.Vector3(),v:new THREE.Vector3(),r:new THREE.Euler(),w:new THREE.Vector3(),s:1,g:1,drag:1});let pi=0;
+const _m=new THREE.Matrix4(),_q=new THREE.Quaternion(),_s=new THREE.Vector3(),_c=new THREE.Color();
+function spawnP(x,y,z,vx,vy,vz,col,life=3,s=1,g=1,drag=1){const p=P[pi];pi=(pi+1)%PMAX;p.life=life;p.p.set(x,y,z);p.v.set(vx,vy,vz);p.r.set(Math.random()*6,Math.random()*6,Math.random()*6);p.w.set((Math.random()-.5)*20,(Math.random()-.5)*20,(Math.random()-.5)*20);p.s=s;p.g=g;p.drag=drag;pMesh.setColorAt((pi+PMAX-1)%PMAX,_c.set(col))}
+function updP(dt){for(let i=0;i<PMAX;i++){const p=P[i];if(p.life<=0){_m.makeScale(0,0,0);pMesh.setMatrixAt(i,_m);continue}
+ p.life-=dt;p.v.y-=9.8*p.g*dt;p.v.multiplyScalar(1-dt*1.8*p.drag);p.v.x+=U.uWind.value*0.6*dt*p.drag;p.p.addScaledVector(p.v,dt);
+ if(p.p.y<0.01){p.p.y=0.01;p.v.set(0,0,0);p.w.multiplyScalar(0.9)}p.r.x+=p.w.x*dt;p.r.y+=p.w.y*dt;p.r.z+=p.w.z*dt;
+ const sc=p.s*Math.min(1,p.life*2);_s.set(sc,sc,sc);_m.compose(p.p,_q.setFromEuler(p.r),_s);pMesh.setMatrixAt(i,_m)}
+ pMesh.instanceMatrix.needsUpdate=true;pMesh.instanceColor.needsUpdate=true}
+const grassCols=[0x4f7a1e,0x6b9a2a,0x8fb03a,0x3e6618,0xa8b85a];
+
+// ===== TOOLS =====
+// r=radius(m), mode: drag|click|throw, step, fx, slashLen
+const TOOLS=[
+ ['✂️','Scissors',{r:.07,mode:'click',burst:8,anim:'snip'}],
+ ['🗡️','Katana',{r:.12,mode:'slash',len:1.1,fx:'arc',col:0xe8f4ff}],
+ ['🚜','Lawnmower',{r:.45,mode:'drag',fx:'spray',flat:true}],
+ ['🌾','Scythe',{r:.18,mode:'slash',len:1.6,fx:'arc',col:0xcccccc}],
+ ['🔪','Machete',{r:.14,mode:'slash',len:.7,fx:'arc',col:0xdddddd}],
+ ['⛓️','Chainsaw',{r:.2,mode:'drag',fx:'spray',shake:1}],
+ ['🔴','Laser',{r:.04,mode:'drag',fx:'laser',col:0xff2020,burn:1}],
+ ['🌿','Hedge trimmer',{r:.25,mode:'drag',fx:'spray',flat:true}],
+ ['🪓','Axe',{r:.35,mode:'click',burst:60,anim:'chop',shock:1}],
+ ['🌙','Sickle',{r:.1,mode:'slash',len:.6,fx:'arc',col:0xbbbbbb}],
+ ['🔥','Flamethrower',{r:.6,mode:'drag',fx:'fire',burn:1}],
+ ['🌀','Weed whacker',{r:.3,mode:'drag',fx:'spray',spin:1}],
+ ['⚔️','Lightsaber',{r:.1,mode:'slash',len:1.3,fx:'arc',col:0x40c0ff,glow:1,burn:1}],
+ ['🪒','Razor',{r:.05,mode:'drag',fx:'spray',ground:1}],
+ ['🍴','Kitchen knife',{r:.08,mode:'slash',len:.4,fx:'arc',col:0xffffff}],
+ ['⭐','Shuriken',{r:.12,mode:'throw',col:0x888899}],
+ ['🪚','Saw',{r:.12,mode:'drag',fx:'spray',zig:1}],
+ ['🛡️','Long sword',{r:.15,mode:'slash',len:1.4,fx:'arc',col:0xffe9a0}],
+ ['🌸','Pruning shears',{r:.1,mode:'click',burst:14,anim:'snip'}],
+ ['🪄','Magic wand',{r:.8,mode:'click',burst:90,fx:'magic',magic:1}],
+];
+let tool=TOOLS[0];
+const tb=document.getElementById('tools');TOOLS.forEach((t,i)=>{const b=document.createElement('button');b.textContent=t[0];b.title=t[1];b.onclick=()=>selTool(i);tb.appendChild(b)});
+function selTool(i){tool=TOOLS[i];[...tb.children].forEach((b,j)=>b.classList.toggle('on',j==i));document.getElementById('tname').textContent=tool[0]+' '+tool[1];buildToolModel()}
+// tool 3D model
+const toolG=new THREE.Group();scene.add(toolG);let toolInner=null;
+function buildToolModel(){if(toolInner)toolG.remove(toolInner);const g=new THREE.Group();const o=tool[2];
+ const metal=new THREE.MeshStandardMaterial({color:o.col||0xcfd6dc,metalness:.9,roughness:.25,emissive:o.glow?o.col:0,emissiveIntensity:o.glow?3:0});
+ const handle=new THREE.MeshStandardMaterial({color:0x2a1a10,roughness:.7});const red=new THREE.MeshStandardMaterial({color:0xc02020,roughness:.5});
+ const n=tool[1];const B=(w,h,d,m,x=0,y=0,z=0)=>{const me=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);me.position.set(x,y,z);me.castShadow=true;g.add(me);return me};
+ if(n=='Lawnmower'){B(.7,.25,.9,red,0,.2,0);B(.05,.6,.05,handle,0,.6,.5).rotation.x=.5;[[-.33,-.4],[.33,-.4],[-.33,.4],[.33,.4]].forEach(([x,z])=>{const w=new THREE.Mesh(new THREE.CylinderGeometry(.1,.1,.06,16),handle);w.rotation.z=Math.PI/2;w.position.set(x,.1,z);g.add(w)})}
+ else if(n=='Chainsaw'||n=='Hedge trimmer'||n=='Saw'){B(.2,.2,.3,n=='Saw'?handle:red,0,.5,.3);B(.04,.08,.9,metal,0,.5,-.3)}
+ else if(n=='Weed whacker'){B(.04,1.2,.04,handle,0,.6,.3).rotation.x=.4;const d=new THREE.Mesh(new THREE.CylinderGeometry(.15,.15,.05,16),red);d.position.y=.06;g.add(d)}
+ else if(n=='Flamethrower'||n=='Laser'){B(.12,.12,.6,n=='Laser'?metal:red,0,.6,.3);B(.06,.06,.3,metal,0,.6,-.1)}
+ else if(n=='Shuriken'){const s=new THREE.Mesh(new THREE.CylinderGeometry(.15,.15,.02,4),metal);s.position.y=.4;g.add(s)}
+ else if(n=='Magic wand'){B(.03,.6,.03,handle,0,.5,0);const st=new THREE.Mesh(new THREE.OctahedronGeometry(.07),new THREE.MeshStandardMaterial({color:0xffe080,emissive:0xffc040,emissiveIntensity:3}));st.position.y=.85;g.add(st)}
+ else if(n=='Axe'){B(.05,.9,.05,handle,0,.6,0);B(.25,.2,.03,metal,.12,1.0,0)}
+ else if(n=='Scissors'||n=='Pruning shears'){const a=B(.02,.3,.01,metal,0,.3,0),b=B(.02,.3,.01,metal,0,.3,0);a.rotation.z=.25;b.rotation.z=-.25;g.userData.snip=[a,b];B(.08,.08,.02,n=='Scissors'?red:handle,0,.5,0)}
+ else if(n=='Scythe'){B(.04,1.5,.04,handle,0,.8,.3);B(.9,.03,.08,metal,-.4,.1,.3)}
+ else if(n=='Sickle'){const t=new THREE.Mesh(new THREE.TorusGeometry(.2,.015,6,20,Math.PI*1.3),metal);t.position.y=.3;g.add(t);B(.03,.18,.03,handle,.2,.15,0)}
+ else{const L=o.len||.5;B(.04,.15,.04,handle,0,.6+L/2+.08,0);B(.03,L,.01,metal,0,.6,0);B(.12,.02,.04,handle,0,.6+L/2,0)}
+ if(o.glow){const l=new THREE.PointLight(o.col,2,3);l.position.y=.6;g.add(l)}
+ toolInner=g;toolG.add(g)}
+selTool(0);
+
+// ===== FX =====
+const fxGroup=new THREE.Group();scene.add(fxGroup);const fxs=[];
+function arc(a,b,col,w=.08){const dir=new THREE.Vector3().subVectors(b,a);const L=dir.length();if(L<.01)return;const m=new THREE.Mesh(new THREE.PlaneGeometry(L,w),new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:.8,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,depthWrite:false}));
+ m.position.copy(a).add(b).multiplyScalar(.5);m.position.y=Math.max(.05,cutH()+.03);m.rotation.x=-Math.PI/2;m.rotation.z=-Math.atan2(dir.z,dir.x);fxGroup.add(m);fxs.push({m,life:.35,max:.35})}
+function updFx(dt){for(let i=fxs.length-1;i>=0;i--){const f=fxs[i];f.life-=dt;f.m.material.opacity=Math.max(0,f.life/f.max)*.8;if(f.life<=0){fxGroup.remove(f.m);f.m.geometry.dispose();fxs.splice(i,1)}}}
+
+// ===== +1 POPUPS =====
+const PL=400,plusArr=[];{const c=document.createElement('canvas');c.width=64;c.height=32;const x=c.getContext('2d');x.font='bold 26px system-ui';x.textAlign='center';x.textBaseline='middle';x.lineWidth=4;x.strokeStyle='rgba(0,40,0,.7)';x.strokeText('+1',32,17);x.fillStyle='#6dff5a';x.fillText('+1',32,17);
+ const tex=new THREE.CanvasTexture(c);for(let i=0;i<PL;i++){const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,depthWrite:false,fog:false}));sp.visible=false;sp.scale.set(.08,.04,1);scene.add(sp);plusArr.push({sp,life:0,y0:0})}}
+let plI=0,plFrame=0;
+function plusOne(x,y,z){if(plFrame>=25)return;plFrame++;const p=plusArr[plI];plI=(plI+1)%PL;p.life=1;p.y0=y+.03;p.sp.position.set(x,p.y0,z);p.sp.visible=true}
+function updPlus(dt){plFrame=0;for(const p of plusArr){if(p.life<=0)continue;p.life-=dt*1.2;const k=1-p.life;p.sp.position.y=p.y0+.03*(1-(1-k)*(1-k));p.sp.material.opacity=Math.max(0,p.life);if(p.life<=0)p.sp.visible=false}}
+// ===== CUTTING =====
+const cutH=()=>+document.getElementById('cutH').value;
+let tNow=0,cutCount=0;
+function cutAt(x,z,r,opt={}){const o=tool[2],h=o.ground?0.02:cutH(),hits=[];
+ const g0x=Math.max(0,Math.floor((x-r+half)/GC)),g1x=Math.min(GN-1,Math.floor((x+r+half)/GC)),g0z=Math.max(0,Math.floor((z-r+half)/GC)),g1z=Math.min(GN-1,Math.floor((z+r+half)/GC));
+ let lo=1e9,hi=0;let n=0;
+ for(let gz=g0z;gz<=g1z;gz++)for(let gx=g0x;gx<=g1x;gx++){for(const i of grid[gz*GN+gx]){const dx=aOff[i*4]-x,dz=aOff[i*4+1]-z;if(dx*dx+dz*dz>r*r)continue;
+  const ch=curH(i,tNow);if(ch<=h+0.01)continue;
+  aCut[i*4]=tNow;aCut[i*4+1]=(1+Math.random()*7)/(raining?2.5:1);aCut[i*4+2]=h;aCut[i*4+3]=o.burn?-1:1;lo=Math.min(lo,i);hi=Math.max(hi,i);n++;cutCount++;plusOne(aOff[i*4],h,aOff[i*4+1]);
+  if(Math.random()<(o.burn?.15:.6)){const bx=aOff[i*4],bz=aOff[i*4+1],len=ch-h;
+   if(o.burn){spawnP(bx,h+.05,bz,(Math.random()-.5)*.3,.5+Math.random(),(Math.random()-.5)*.3,Math.random()<.5?0x222222:0xff7a20,1.2,1.4,-.1,3)}
+   else{const sp=o.spin?4:o.flat?2.5:1.4;const ps=Math.min(4,Math.max(0.6,len*6));spawnP(bx,h+len*.5*Math.random(),bz,(Math.random()-.5)*sp+(opt.vx||0),1+Math.random()*2.5*(o.flat?1.3:1),(Math.random()-.5)*sp+(opt.vz||0),grassCols[(Math.random()*5)|0],3+Math.random()*3,ps,.5)}}}}
+ if(n){cutAttr.addUpdateRange?cutAttr.addUpdateRange(lo*4,(hi-lo+1)*4):0;cutAttr.needsUpdate=true}
+ if(o.fx=='fire'&&Math.random()<.9)for(let k=0;k<6;k++)spawnP(x+(Math.random()-.5)*r,.1,z+(Math.random()-.5)*r,(Math.random()-.5),1.5+Math.random()*2,(Math.random()-.5),[0xffa020,0xff5010,0xffe060][k%3],.7,2.5,-.3,2);
+ if(o.magic)for(let k=0;k<30;k++){const a=Math.random()*6.28;spawnP(x+Math.cos(a)*r*Math.random(),.2,z+Math.sin(a)*r*Math.random(),0,1+Math.random()*2,0,[0xff80ff,0x80ffff,0xffff80][k%3],1.5,1.2,-.2,2)}
+ if(o.fx=='laser')for(let k=0;k<3;k++)spawnP(x,h+.02,z,(Math.random()-.5)*2,Math.random()*2,(Math.random()-.5)*2,0xff4040,.4,.6,1);
+ if(o.ground&&Math.random()<.3)spawnP(x,.02,z,(Math.random()-.5),.5,(Math.random()-.5),0x5a4020,1,1,1);
+ checkHits(x,z,r);}
+function cutSeg(a,b,r){const d=a.distanceTo(b),st=Math.max(1,Math.ceil(d/(r*.6)));const vx=(b.x-a.x)/Math.max(d,.01)*2,vz=(b.z-a.z)/Math.max(d,.01)*2;for(let i=0;i<=st;i++){const t=i/st;cutAt(a.x+(b.x-a.x)*t,a.z+(b.z-a.z)*t,r,{vx,vz})}}
+
+// ===== INPUT =====
+const ray=new THREE.Raycaster(),ndc=new THREE.Vector2(),plane=new THREE.Plane(new THREE.Vector3(0,1,0),0);
+const hit=new THREE.Vector3(),last=new THREE.Vector3();let down=false,hasLast=false,anim=0,slashDir=0;
+function pick(e){ndc.set(e.clientX/innerWidth*2-1,-(e.clientY/innerHeight)*2+1);ray.setFromCamera(ndc,cam);return ray.ray.intersectPlane(plane,hit)}
+let touches=0;
+R.domElement.addEventListener('pointerdown',e=>{if(e.pointerType=='touch'){touches++;if(touches>1){down=false;return}}if(e.button!==0)return;if(!pick(e))return;down=true;last.copy(hit);hasLast=true;const o=tool[2];
+ if(o.mode=='click'){cutAt(hit.x,hit.z,o.r*(o.burst>50?1:1.4));anim=1;if(o.shock)for(let k=0;k<40;k++)spawnP(hit.x,.02,hit.z,(Math.random()-.5)*3,2+Math.random()*2,(Math.random()-.5)*3,0x5a4020,1.5,1.3,1)}
+ else if(o.mode=='throw')throwStar(hit.clone());else anim=1});
+addEventListener('pointerup',e=>{if(e.pointerType=='touch')touches=Math.max(0,touches-1);down=false;hasLast=false});
+addEventListener('pointercancel',()=>{touches=0;down=false});
+R.domElement.addEventListener('pointermove',e=>{if(!pick(e))return;toolG.position.lerp(hit,1);if(!down||touches>1)return;const o=tool[2];
+ if(o.mode=='drag'){let a=last.clone(),b=hit.clone();if(o.zig){b.x+=Math.sin(tNow*60)*.05}cutSeg(a,b,o.r);if(o.fx=='laser')arc(a,b,o.col,.03);last.copy(hit);anim=1}
+ else if(o.mode=='slash'){const d=hit.distanceTo(last);if(d>o.len*.25){const dir=new THREE.Vector3().subVectors(hit,last).normalize();const a=last.clone(),b=last.clone().addScaledVector(dir,Math.max(d,o.len));
+   cutSeg(a,b,o.r);arc(a,b,o.col,o.r*1.2);slashDir=Math.atan2(dir.x,dir.z);anim=1;last.copy(hit)}}
+ else if(o.mode=='click'&&e.buttons&1&&hit.distanceTo(last)>o.r*1.5){cutAt(hit.x,hit.z,o.r*1.4);last.copy(hit);anim=1}});
+R.domElement.addEventListener('contextmenu',e=>e.preventDefault());
+// shuriken
+const stars=[];function throwStar(target){const s=new THREE.Mesh(new THREE.CylinderGeometry(.12,.12,.015,4),new THREE.MeshStandardMaterial({color:0x9999aa,metalness:1,roughness:.2}));
+ const from=cam.position.clone().lerp(target,.25);from.y=Math.max(.8,from.y*.5);s.position.copy(from);scene.add(s);
+ const v=new THREE.Vector3().subVectors(target,from);v.y=0;v.normalize().multiplyScalar(14);stars.push({s,v,life:1.6,y:Math.max(cutH()+.03,.08),last:from.clone()})}
+function updStars(dt){for(let i=stars.length-1;i>=0;i--){const st=stars[i];st.life-=dt;st.s.position.addScaledVector(st.v,dt);st.s.position.y+=(st.y-st.s.position.y)*Math.min(1,dt*6);st.s.rotation.y+=dt*30;
+ const p=st.s.position;if(Math.abs(p.x)<half&&Math.abs(p.z)<half){cutSeg(new THREE.Vector3(st.last.x,0,st.last.z),new THREE.Vector3(p.x,0,p.z),.12);arc(st.last,p.clone(),0xaaaacc,.05)}st.last.copy(p);
+ if(st.life<=0){scene.remove(st.s);stars.splice(i,1)}}}
+
+// ===== BIRDS =====
+const birds=[];const bMat=new THREE.MeshStandardMaterial({color:0x3a2f28,roughness:.8}),bMat2=new THREE.MeshStandardMaterial({color:0x6a5040,side:THREE.DoubleSide});
+function makeBird(){const g=new THREE.Group();const body=new THREE.Mesh(new THREE.SphereGeometry(.09,10,8),bMat);body.scale.set(1,.8,1.8);body.castShadow=true;g.add(body);
+ const head=new THREE.Mesh(new THREE.SphereGeometry(.055,8,6),bMat);head.position.set(0,.04,.16);g.add(head);
+ const beak=new THREE.Mesh(new THREE.ConeGeometry(.018,.06,5),new THREE.MeshStandardMaterial({color:0xe0a020}));beak.rotation.x=Math.PI/2;beak.position.set(0,.03,.22);g.add(beak);
+ const wg=new THREE.PlaneGeometry(.3,.13);wg.translate(.15,0,0);const wl=new THREE.Mesh(wg,bMat2),wr=new THREE.Mesh(wg,bMat2);wl.rotation.x=-Math.PI/2;wr.rotation.x=-Math.PI/2;
+ const pl=new THREE.Group(),pr=new THREE.Group();pl.add(wl);pr.add(wr);pr.scale.x=-1;wl.castShadow=wr.castShadow=true;g.add(pl,pr);g.userData={pl,pr};return g}
+function spawnFlock(low=false){const n=1+(Math.random()*4|0);const a=Math.random()*6.28,dir=new THREE.Vector3(-Math.cos(a),0,-Math.sin(a));const start=new THREE.Vector3(Math.cos(a)*22,0,Math.sin(a)*22);
+ const alt=low||Math.random()<.4?.3+Math.random()*.9:2+Math.random()*4;const side=new THREE.Vector3(-dir.z,0,dir.x);
+ for(let i=0;i<n;i++){const m=makeBird();scene.add(m);birds.push({m,p:start.clone().addScaledVector(side,(Math.random()-.5)*3).addScaledVector(dir,-i*.6),dir:dir.clone(),alt:alt+(Math.random()-.5)*.3,ph:Math.random()*6,spd:4+Math.random()*2,curve:(Math.random()-.5)*.25,dead:false,v:new THREE.Vector3(),life:30})}
+ toast(low?'🐦 Low-flying birds incoming!':'🐦 Birds flying over')}
+function updBirds(dt){for(let i=birds.length-1;i>=0;i--){const b=birds[i],m=b.m;b.life-=dt;
+ if(!b.dead){b.dir.applyAxisAngle(new THREE.Vector3(0,1,0),b.curve*dt);b.p.addScaledVector(b.dir,b.spd*dt);b.ph+=dt*(14+b.spd);
+  m.position.set(b.p.x,b.alt+Math.sin(b.ph*.15)*.15,b.p.z);m.rotation.y=Math.atan2(b.dir.x,b.dir.z);const f=Math.sin(b.ph)*.9;m.userData.pl.rotation.z=f;m.userData.pr.rotation.z=f;
+  if(b.p.length()>30)b.life=0}
+ else{b.v.y-=9.8*dt;m.position.addScaledVector(b.v,dt);m.rotation.x+=dt*b.spin;m.rotation.z+=dt*b.spin*.7;if(m.position.y<.08){m.position.y=.08;b.v.multiplyScalar(0);b.spin=0}}
+ if(b.life<=0){scene.remove(m);birds.splice(i,1)}}}
+function featherBurst(p,n=60){for(let k=0;k<n;k++)spawnP(p.x,p.y,p.z,(Math.random()-.5)*3,Math.random()*3,(Math.random()-.5)*3,[0x6a5040,0xeeeeee,0x3a2f28,0xaa8866][k%4],6,1.6,.25,4)}
+let birdKills=0;
+function checkHits(x,z,r){const reach=tool[2].mode=='throw'?1:(tool[2].len?1.9:1.3);
+ for(const b of birds){if(b.dead)continue;const p=b.m.position;const dx=p.x-x,dz=p.z-z;if(dx*dx+dz*dz<(r+.25)**2&&p.y<reach){b.dead=true;b.v.set(b.dir.x*b.spd*.4,1.5,b.dir.z*b.spd*.4);b.spin=6;b.life=25;featherBurst(p);
+  for(let k=0;k<15;k++)spawnP(p.x,p.y,p.z,(Math.random()-.5)*2,Math.random()*2,(Math.random()-.5)*2,0x990000,2,.5,1);birdKills++;toast('💀 Oops! You hit a bird…')}}
+ for(const n of nests){if(n.broken)continue;const dx=n.p.x-x,dz=n.p.z-z,d2=dx*dx+dz*dz;if(d2<(r+.25)**2){if(!n.revealed){n.revealed=true;toast('🥚 You found a bird nest with eggs!');n.revT=tNow}
+  else if(tNow-n.revT>.8&&d2<(r+.12)**2){n.broken=true;n.eggs.forEach(e=>{e.visible=false;for(let k=0;k<20;k++)spawnP(e.getWorldPosition(new THREE.Vector3()).x,.1,e.getWorldPosition(new THREE.Vector3()).z,(Math.random()-.5)*2,1+Math.random()*2,(Math.random()-.5)*2,k%2?0xf4f0e0:0xffcc20,3,1.5,1)});toast('💔 You broke the eggs!')}}}}
+
+// ===== NESTS =====
+const nests=[];
+function spawnNest(){const g=new THREE.Group();const nest=new THREE.Mesh(new THREE.TorusGeometry(.16,.06,8,20),new THREE.MeshStandardMaterial({color:0x6b4a2a,roughness:1}));nest.rotation.x=Math.PI/2;nest.position.y=.05;nest.castShadow=true;g.add(nest);
+ const eggs=[];const k=2+(Math.random()*3|0);for(let i=0;i<k;i++){const e=new THREE.Mesh(new THREE.SphereGeometry(.045,12,10),new THREE.MeshStandardMaterial({color:0xbfe0e8,roughness:.4}));e.scale.y=1.3;const a=i/k*6.28;e.position.set(Math.cos(a)*.06,.08,Math.sin(a)*.06);e.castShadow=true;g.add(e);eggs.push(e)}
+ const p=new THREE.Vector3((Math.random()-.5)*FIELD*.8,0,(Math.random()-.5)*FIELD*.8);g.position.copy(p);scene.add(g);nests.push({g,p,eggs,revealed:false,broken:false});toast('🪺 A bird hid a nest somewhere in the grass… (40% event)')}
+
+// ===== RAIN =====
+const RN=mobile?4000:12000;const rGeo=new THREE.BufferGeometry();const rPos=new Float32Array(RN*6);
+for(let i=0;i<RN;i++){const x=(Math.random()-.5)*40,y=Math.random()*20,z=(Math.random()-.5)*40;rPos.set([x,y,z,x+.03,y-.35,z],i*6)}
+rGeo.setAttribute('position',new THREE.BufferAttribute(rPos,3));const rain=new THREE.LineSegments(rGeo,new THREE.LineBasicMaterial({color:0xaabbcc,transparent:true,opacity:.45}));rain.frustumCulled=false;rain.visible=false;scene.add(rain);
+let raining=false,rainEnd=0,wet=0;function setRain(on,dur){raining=on;rainEnd=tNow+(dur||5+Math.random()*115);toast(on?'🌧️ It started raining':'☀️ The rain stopped')}
+function updRain(dt){wet+=((raining?1:0)-wet)*Math.min(1,dt*.4);U.uWet.value=wet;rain.visible=wet>.02;rain.material.opacity=.45*wet;
+ if(raining&&tNow>rainEnd)setRain(false);
+ if(rain.visible){const a=rGeo.attributes.position.array;for(let i=0;i<RN;i++){let o=i*6;a[o+1]-=22*dt;a[o+4]-=22*dt;if(a[o+1]<0){if(Math.random()<.08&&wet>.5)spawnP(a[o],.02,a[o+2],(Math.random()-.5)*.6,.8,(Math.random()-.5)*.6,0xcfe0ff,.3,.4,1);a[o+1]+=20;a[o+4]+=20}}rGeo.attributes.position.needsUpdate=true}
+ sun.intensity=3.2*(1-wet*.8);hemi.intensity=.9*(1-wet*.4);U.uWind.value=1+wet*1.2;su.rayleigh.value=1.6+wet*2;su.turbidity.value=6+wet*14;R.toneMappingExposure=.55*(1-wet*.35);
+ scene.fog.color.copy(fogC).lerp(new THREE.Color(0x707a84),wet);scene.fog.density=.022+wet*.03;U.uFogD.value=scene.fog.density}
+
+// ===== EVENTS / UI =====
+let nextBird=rand(12,30),nextEgg=300,nextRain=600;function rand(a,b){return a+Math.random()*(b-a)}
+const birdsPerMin=()=>2+Math.random()*3;
+function events(){if(tNow>nextBird){spawnFlock();nextBird=tNow+60/birdsPerMin()}
+ if(tNow>nextEgg){nextEgg+=300;if(Math.random()<.4)spawnNest()}
+ if(tNow>nextRain){nextRain+=600;if(!raining&&Math.random()<.2)setRain(true)}}
+function toast(s){const d=document.createElement('div');d.className='t';d.textContent=s;document.getElementById('toast').appendChild(d);setTimeout(()=>d.style.opacity=0,2800);setTimeout(()=>d.remove(),3500)}
+const dbg=document.getElementById('dbg');const tgl=()=>dbg.style.display=dbg.style.display=='block'?'none':'block';
+addEventListener('keydown',e=>{if(e.key=='d'||e.key=='D')tgl();const n=parseInt(e.key);if(!isNaN(n))selTool(n===0?9:n-1)});document.getElementById('dbgBtn').onclick=tgl;
+fBird.onclick=()=>spawnFlock();fLow.onclick=()=>spawnFlock(true);fEgg.onclick=()=>spawnNest();fRain.onclick=()=>setRain(!raining);
+const cH=document.getElementById('cutH'),mH=document.getElementById('maxH');const fmt=v=>v<1?Math.round(v*100)+' cm':(+v).toFixed(2)+' m';
+const syncUI=()=>{document.getElementById('cutHv').textContent=fmt(+cH.value);document.getElementById('maxHv').textContent=fmt(+mH.value);U.uMaxH.value=+mH.value};cH.oninput=mH.oninput=syncUI;syncUI();
+addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();R.setSize(innerWidth,innerHeight)});
+// adaptive density
+let fpsAcc=0,fpsN=0,fpsT=0;
+const clock=new THREE.Clock();
+function loop(){const dt=Math.min(clock.getDelta(),.05);tNow+=dt;U.uT.value=tNow;
+ fpsAcc+=dt;fpsN++;if(fpsAcc>2){const fps=fpsN/fpsAcc;if(fps<40&&bladeGeo.instanceCount>30000)bladeGeo.instanceCount=Math.floor(bladeGeo.instanceCount*.8);else if(fps>57&&bladeGeo.instanceCount<N)bladeGeo.instanceCount=Math.min(N,Math.floor(bladeGeo.instanceCount*1.1));
+  document.getElementById('stats').textContent=`${fps.toFixed(0)} fps · ${(bladeGeo.instanceCount/1000|0)}k blades · cut ${cutCount} · 🐦💀 ${birdKills}`;
+  document.getElementById('dinfo').textContent=`next birds ${Math.max(0,nextBird-tNow)|0}s · egg roll ${nextEgg-tNow|0}s · rain roll ${nextRain-tNow|0}s`;fpsAcc=0;fpsN=0}
+ events();updBirds(dt);updStars(dt);updP(dt);updFx(dt);updRain(dt);updPlus(dt);document.getElementById('cnt').textContent=cutCount.toLocaleString();
+ // tool anim
+ anim=Math.max(0,anim-dt*4);const o=tool[2];toolInner.rotation.set(0,0,0);toolInner.position.set(0,0,0);
+ if(o.mode=='slash'){toolInner.rotation.y=slashDir;toolInner.rotation.x=-1.2*anim-.3}else if(o.anim=='chop'){toolInner.rotation.x=-anim*1.4;toolInner.position.y=-anim*.4}
+ else if(o.spin)toolInner.children[1].rotation.y+=dt*40;else if(o.shake&&down)toolInner.position.x=(Math.random()-.5)*.02;
+ if(toolInner.userData.snip){const s=.25*(1-anim);toolInner.userData.snip[0].rotation.z=s;toolInner.userData.snip[1].rotation.z=-s}
+ if(o.mode=='drag'&&!o.spin&&tool[1]!='Lawnmower')toolInner.rotation.x=-.9;
+ ctl.update();R.render(scene,cam);requestAnimationFrame(loop)}
+loop();
+window.__game={spawnFlock,spawnNest,setRain,cutSeg,selTool};
+</script></body></html>
